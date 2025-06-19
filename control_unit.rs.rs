@@ -11,11 +11,11 @@
 // - Data forwarding to minimize pipeline pipeline_stalls
 // - Flag register for branch condition evaluation
 // - Chaos-Weighted Pipeline Override System for adaptive hazard mitigation (ENHANCED)
-// - Probabilistic Hazard FSM for advanced state-based pipeline adjustments (ENHANCED)
 // - Pattern Detector for Higher-Order Anomaly Detection (ENHANCED)
 // - INTEGRATED: External entropy input from 'entropy_bus.txt' for dynamic system adaptation
 // - INTEGRATED: ML-predicted actions from 'ml_predictions.txt' to modulate FSM
 // - INTEGRATED: ARCHON HAZARD OVERRIDE UNIT with fluctuating impact and cache miss awareness.
+// - NEW: Entropy-Aware FSM Extension for log-ready control and visual inspection.
 // ===============================================================================
 
 // =====================================================================
@@ -276,7 +276,7 @@ module data_mem(
     always @(posedge clk) begin
         if (mem_read_enable) begin
             read_data <= dmem[addr];
-        end
+        }
     end
 
 endmodule
@@ -296,7 +296,7 @@ module quantum_entropy_detector(
     input wire [3:0] alu_result,   // Example: ALU result can influence entropy (from EX/MEM)
     input wire zero_flag,          // Example: ALU flags can influence entropy (from EX/MEM)
     // ... other internal CPU signals that could affect quantum state ...
-    output reg [15:0] entropy_score_out // CHANGED to 16-bit
+    output reg [7:0] entropy_score_out // CHANGED to 8-bit to match fsm_entropy_overlay
 );
 
     // Placeholder: Entropy value increases with complex/branching instructions
@@ -305,21 +305,21 @@ module quantum_entropy_detector(
     // measurements or a complex internal quantum state model.
     always @(posedge clk or posedge reset) begin
         if (reset) begin
-            entropy_score_out <= 16'h0000;
+            entropy_score_out <= 8'h00;
         end else begin
             // Simple heuristic: increase entropy on non-NOP, non-trivial ALU ops
             // and based on how 'unexpected' an ALU result might be.
             // Using 4 MSBs of 16-bit instr_opcode as actual opcode
             if (instr_opcode != 4'h9) begin // If not a NOP (assuming 4'h9 is NOP opcode)
                 if (alu_result == 4'h0 && !zero_flag) begin // An "unexpected" zero result (not explicitly set)
-                    entropy_score_out <= entropy_score_out + 16'h0100; // Larger jump for anomaly, now 16-bit
-                end else if (entropy_score_out < 16'hFFFF) begin // Prevent overflow
-                    entropy_score_out <= entropy_score_out + 16'h0001;
+                    entropy_score_out <= entropy_score_out + 8'h10; // Larger jump for anomaly
+                end else if (entropy_score_out < 8'hFF) begin // Prevent overflow
+                    entropy_score_out <= entropy_score_out + 8'h01;
                 end
             end else begin
                 // Reduce entropy during NOPs or idle cycles
-                if (entropy_score_out > 16'h0000)
-                    entropy_score_out <= entropy_score_out - 16'h0001;
+                if (entropy_score_out > 8'h00)
+                    entropy_score_out <= entropy_score_out - 8'h01;
             end
         end
     end
@@ -339,7 +339,7 @@ module chaos_detector(
     input wire [3:0] mem_access_addr, // Example: Erratic memory access patterns (from MEM)
     input wire [3:0] data_mem_read_data, // Example: Unexpected data values (from MEM)
 
-    output reg [15:0] chaos_score_out // CHANGED to 16-bit
+    output reg [15:0] chaos_score_out // 16-bit output
 );
 
     // Placeholder: Chaos score increases with mispredictions and erratic behavior.
@@ -349,14 +349,14 @@ module chaos_detector(
             chaos_score_out <= 16'h0000;
         end else begin
             if (branch_mispredicted) begin
-                chaos_score_out <= chaos_score_out + 16'h0100; // Significant jump for misprediction, now 16-bit
+                chaos_score_out <= chaos_score_out + 16'h0100; // Significant jump for misprediction
             end
 
             // Simulate some "erratic" memory access contributing to chaos
             // This is purely illustrative and would need robust detection logic
             // Example: Accessing a forbidden address or unusual data for an address
             if (mem_access_addr == 4'hF && data_mem_read_data == 4'h5) begin // Specific "bad" read pattern
-                chaos_score_out <= chaos_score_out + 16'h0050; // Now 16-bit increment
+                chaos_score_out <= chaos_score_out + 16'h0050;
             end
 
             // Gradually decay chaos over time if no new events
@@ -431,43 +431,62 @@ module pattern_detector(
 endmodule
 
 // ======================================================================
-// File: probabilistic_hazard_fsm.v
-// Module: probabilistic_hazard_fsm
-// Description: Implements a state machine for adaptive hazard management,
-//              integrating ML-predicted actions with internal hazard flags.
-//              Outputs control signals to the CPU pipeline.
+// File: fsm_entropy_overlay.v
+// Module: fsm_entropy_overlay
+// Description: Implements an entropy-aware FSM for adaptive hazard management,
+//              integrating ML-predicted actions, internal hazard flags,
+//              and an internal entropy score. It outputs control signals
+//              (STALL, FLUSH, LOCK) and logs entropy at state transitions.
+//              This module acts as a bridge for visual inspection and runtime
+//              override debugging.
 // ======================================================================
-module probabilistic_hazard_fsm(
-    input wire clk,
-    input wire rst_n, // Active low reset
-    input wire [1:0] ml_predicted_action, // 2-bit input from ML (00=OK, 01=STALL, 10=FLUSH, 11=OVERRIDE/LOCK)
-    input wire internal_hazard_flag, // Hazard detected by AHO or traditional CPU logic (single consolidated signal)
-    output reg [1:0] hazard_control_signal // 2-bit output to CPU (00=Normal/NoOp, 01=Stall, 10=Flush, 11=Lock)
+module fsm_entropy_overlay(
+    input wire clk,                 // Clock signal
+    input wire rst_n,               // Active low reset
+    input wire [1:0] ml_predicted_action, // 2-bit input from ML (00=OK, 01=STALL, 10=FLUSH, 11=LOCK)
+    input wire [7:0] internal_entropy_score, // 8-bit internal entropy score (from QED)
+    input wire internal_hazard_flag, // 1-bit hazard detected by AHO or traditional CPU logic (consolidated)
+
+    output reg [1:0] fsm_state,      // 2-bit FSM output: 00=OK, 01=STALL, 10=FLUSH, 11=LOCK
+    output reg [7:0] entropy_log_out // 8-bit pass-through or masked entropy snapshot at transition
 );
 
     // FSM States
     parameter STATE_OK    = 2'b00; // Normal operation, no hazard
     parameter STATE_STALL = 2'b01; // Pipeline stall
     parameter STATE_FLUSH = 2'b10; // Pipeline flush
-    parameter STATE_LOCK  = 2'b11; // Critical system lock (triggered by ML OVERRIDE)
+    parameter STATE_LOCK  = 2'b11; // Critical system lock (triggered by ML OVERRIDE or severe anomaly)
+
+    // Entropy Threshold for False Negative Simulation
+    // If entropy is very high, even if ML says OK, we trigger a STALL.
+    parameter ENTROPY_HIGH_THRESHOLD = 8'd180; // Threshold for triggering STALL on ML_OK
 
     reg [1:0] current_state;
     reg [1:0] next_state;
 
     // --- State Register: Synchronous update, Asynchronous active-low reset ---
-    // This block updates the current state on the positive clock edge.
-    // An asynchronous, active-low reset (`rst_n`) forces the FSM to STATE_OK immediately.
+    // This block updates the 'current_state' on the positive clock edge.
+    // An asynchronous, active-low reset (`rst_n`) forces the FSM to STATE_OK.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin // If reset is active (low)
             current_state <= STATE_OK; // Reset to the OK state
+            entropy_log_out <= 8'h00; // Reset log output
         end else begin
             current_state <= next_state; // Otherwise, update state on clock edge
+
+            // Log entropy on state transition
+            // This captures the entropy score right before the new state is adopted.
+            if (next_state != current_state) begin
+                entropy_log_out <= internal_entropy_score;
+            end else begin
+                entropy_log_out <= 8'h00; // Clear log if no transition to indicate stable state
+            end
         end
     end
 
     // --- Next State Logic: Combinational ---
     // This block determines the 'next_state' based on the 'current_state' and inputs.
-    // It's combinational logic, meaning it reacts immediately to input changes.
+    // It's combinational logic, reacting immediately to input changes.
     always @(*) begin
         next_state = current_state; // Default: stay in current state (unless a transition condition is met)
 
@@ -479,10 +498,13 @@ module probabilistic_hazard_fsm(
                     STATE_FLUSH: next_state = STATE_FLUSH; // ML predicts FLUSH
                     STATE_LOCK:  next_state = STATE_LOCK;  // ML predicts OVERRIDE -> LOCK
                     default: begin // This 'default' handles 2'b00 (OK) or any other unexpected ML input
-                        if (internal_hazard_flag) begin
+                        // Bonus Detail: Simulate a false negative with entropy override
+                        if (ml_predicted_action == STATE_OK && internal_entropy_score > ENTROPY_HIGH_THRESHOLD) begin
+                            next_state = STATE_STALL; // High entropy overrides ML_OK, triggers STALL
+                        end else if (internal_hazard_flag) begin
                             next_state = STATE_STALL; // Traditional/combined hazard -> STALL
                         end else begin
-                            next_state = STATE_OK; // No ML action, no internal hazard -> Stay OK
+                            next_state = STATE_OK; // No ML action, no internal hazard, low entropy -> Stay OK
                         end
                     end
                 endcase
@@ -494,10 +516,10 @@ module probabilistic_hazard_fsm(
                     STATE_FLUSH: next_state = STATE_FLUSH; // ML predicts FLUSH (escalate)
                     STATE_LOCK:  next_state = STATE_LOCK;  // ML predicts OVERRIDE -> LOCK
                     default: begin // Handles ML OK (00) or ML STALL (01) or other unexpected
-                        if (ml_predicted_action == STATE_OK && !internal_hazard_flag) begin
-                            next_state = STATE_OK; // ML predicts OK, and no internal hazard -> Return to OK
+                        if (ml_predicted_action == STATE_OK && !internal_hazard_flag && internal_entropy_score <= ENTROPY_HIGH_THRESHOLD) begin
+                            next_state = STATE_OK; // ML predicts OK, no internal hazard, low entropy -> Return to OK
                         end else begin
-                            next_state = STATE_STALL; // Otherwise, remain stalled (ML still recommends STALL or internal hazard persists)
+                            next_state = STATE_STALL; // Otherwise, remain stalled (ML still recommends STALL or hazard persists)
                         end
                     end
                 endcase
@@ -508,8 +530,8 @@ module probabilistic_hazard_fsm(
                 case (ml_predicted_action)
                     STATE_LOCK: next_state = STATE_LOCK; // ML predicts OVERRIDE -> LOCK
                     default: begin // Handles ML OK (00), ML STALL (01), ML FLUSH (10), or other unexpected
-                        if (ml_predicted_action == STATE_OK && !internal_hazard_flag) begin
-                            next_state = STATE_OK; // ML predicts OK, no internal hazard -> Return to OK
+                        if (ml_predicted_action == STATE_OK && !internal_hazard_flag && internal_entropy_score <= ENTROPY_HIGH_THRESHOLD) begin
+                            next_state = STATE_OK; // ML predicts OK, no internal hazard, low entropy -> Return to OK
                         end else if (ml_predicted_action == STATE_STALL) begin
                             next_state = STATE_STALL; // ML predicts STALL -> Transition to STALL after flush
                         end else begin
@@ -530,9 +552,10 @@ module probabilistic_hazard_fsm(
     end
 
     // --- Output Logic: Combinational ---
-    // The 'hazard_control_signal' directly reflects the 'current_state' of the FSM.
+    // The 'fsm_state' directly reflects the 'current_state' of the FSM.
+    // This provides the primary control signal to the pipeline.
     always @(*) begin
-        hazard_control_signal = current_state;
+        fsm_state = current_state;
     end
 
 endmodule
@@ -557,26 +580,26 @@ module archon_hazard_override_unit (
     input logic                 clk,
     input logic                 rst_n, // Active low reset
 
-    // Core Hazard Metrics (NOW 16-bit values for score/rate, 0-65535 range assumed)
-    input logic [15:0]          internal_entropy_score_val, // From QED (Quantum Entropy Detector) - CHANGED to 16-bit
-    input logic [15:0]          chaos_score_val,            // From CD (Chaos Detector) - CHANGED to 16-bit
+    // Core Hazard Metrics (now adapted to 8-bit where needed, Chaos is 16-bit)
+    input logic [7:0]           internal_entropy_score_val, // From QED (Quantum Entropy Detector) - 8-bit
+    input logic [15:0]          chaos_score_val,            // From CD (Chaos Detector) - 16-bit
     input logic                 anomaly_detected_val,       // From Pattern Detector (high, fixed impact)
 
-    // Performance/System Health Metrics (now directly influencing hazard score with fluctuating impact)
-    input logic [15:0]          branch_miss_rate_tracker,   // Current branch miss rate (from BTB or PMU) - CHANGED to 16-bit
-    input logic [15:0]          cache_miss_rate_tracker,    // NEW: Current cache miss rate (from Data Memory/Cache) - CHANGED to 16-bit
-    input logic [15:0]          exec_pressure_tracker,      // Current execution pressure (e.g., pipeline fullness) - CHANGED to 16-bit
+    // Performance/System Health Metrics (now adapted to 8-bit where needed)
+    input logic [7:0]           branch_miss_rate_tracker,   // Current branch miss rate (from BTB or PMU) - 8-bit
+    input logic [7:0]           cache_miss_rate_tracker,    // NEW: Current cache miss rate (from Data Memory/Cache) - 8-bit
+    input logic [7:0]           exec_pressure_tracker,      // Current execution pressure (e.g., pipeline fullness) - 8-bit
 
     // Input from external ML model for dynamic weighting/context
     // This input dictates the current 'risk posture' or 'mode' for hazard detection.
     // Examples: 2'b00=Normal, 2'b01=MonitorRisk, 2'b10=HighRisk, 2'b11=CriticalRisk
     input logic [1:0]           ml_predicted_action,
 
-    // Dynamically scaled thresholds for the combined hazard score (16-bit to match combined score range)
+    // Dynamically scaled thresholds for the combined hazard score (adjusted for new total score range)
     // These thresholds would typically be provided by an external control unit or derived
     // from system-wide context/ML predictions, scaled appropriately for 'total_combined_hazard_score'.
-    input logic [15:0]          scaled_flush_threshold,     // If combined score > this, consider flush
-    input logic [15:0]          scaled_stall_threshold,     // If combined score > this, consider stall
+    input logic [20:0]          scaled_flush_threshold,     // If combined score > this, consider flush
+    input logic [20:0]          scaled_stall_threshold,     // If combined score > this, consider stall
 
     // Outputs to CPU pipeline control (specifically for Probabilistic Hazard FSM or main control)
     output logic                override_flush_sig,         // Request for CPU pipeline flush
@@ -594,26 +617,28 @@ module archon_hazard_override_unit (
     logic [3:0] W_exec;
 
     // --- Internal Signals for Weighted Scores ---
-    // Individual weighted scores are calculated by multiplying raw scores (16-bit) by weights (4-bit).
-    // Max product: 65535 * 15 = 983025. A 20-bit register is sufficient (max value 1048575).
-    logic [19:0] weighted_entropy_score;   // CHANGED to 20-bit
-    logic [19:0] weighted_chaos_score;     // CHANGED to 20-bit
-    logic [19:0] weighted_branch_miss_score; // CHANGED to 20-bit
-    logic [19:0] weighted_cache_miss_score;  // CHANGED to 20-bit
-    logic [19:0] weighted_exec_pressure_score; // CHANGED to 20-bit
+    // Individual weighted scores are calculated by multiplying raw scores by weights.
+    // Max product for 8-bit * 4-bit: 255 * 15 = 3825. A 12-bit register is sufficient.
+    // Max product for 16-bit * 4-bit: 65535 * 15 = 983025. A 20-bit register is sufficient.
+    logic [11:0] weighted_entropy_score;   // 8-bit val * 4-bit weight -> 12-bit
+    logic [19:0] weighted_chaos_score;     // 16-bit val * 4-bit weight -> 20-bit
+    logic [11:0] weighted_branch_miss_score; // 8-bit val * 4-bit weight -> 12-bit
+    logic [11:0] weighted_cache_miss_score;  // 8-bit val * 4-bit weight -> 12-bit
+    logic [11:0] weighted_exec_pressure_score; // 8-bit val * 4-bit weight -> 12-bit
 
     // --- Total Combined Hazard Score ---
-    // Sum of all weighted scores. Max sum: 5 * 983025 = 4915125.
-    // A 23-bit register is sufficient (max value 8388607).
-    logic [22:0] total_combined_hazard_score; // CHANGED to 23-bit
+    // Sum of all weighted scores.
+    // Max sum: (3 * 3825) + (2 * 983025) = 11475 + 1966050 = 1977525.
+    // A 21-bit register is sufficient (max value 2097151).
+    logic [20:0] total_combined_hazard_score; // Adjusted to 21-bit
 
     // --- Output Registers (for synchronous outputs) ---
-    logic reg_override_flush_sig;
-    logic reg_override_stall_sig;
-    logic [1:0] reg_hazard_detected_level;
+    reg reg_override_flush_sig;
+    reg reg_override_stall_sig;
+    reg [1:0] reg_hazard_detected_level;
 
     // --- Clocked Logic for Output Registers ---
-    always_ff @(posedge clk or negedge rst_n) begin
+    always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             reg_override_flush_sig      <= 1'b0;
             reg_override_stall_sig      <= 1'b0;
@@ -629,7 +654,7 @@ module archon_hazard_override_unit (
     // --- Combinational Logic for Dynamic Weight Assignment (Fluctuating Impact) ---
     // This block determines the importance (weights) of each metric based on the
     // 'ml_predicted_action', allowing the system to adapt its sensitivity.
-    always_comb begin
+    always @(*) begin
         case (ml_predicted_action)
             2'b00: begin // Normal Operation: Balanced weights, general monitoring
                 W_entropy = 4'd8;   // Moderate impact for entropy/chaos
@@ -683,7 +708,7 @@ module archon_hazard_override_unit (
 
     // --- Combinational Logic for Override Signals (Multi-dimensional Rule Engine) ---
     // This block implements the decision logic, prioritizing different hazard indicators.
-    always_comb begin
+    always @(*) begin
         override_flush_sig = 1'b0;
         override_stall_sig = 1'b0;
         hazard_detected_level = 2'b00; // Default to no hazard
@@ -712,13 +737,13 @@ module archon_hazard_override_unit (
     end
 
     // Outputs are registered, so assign the internal registered signals
-    assign override_flush_sig_out = reg_override_flush_sig;
-    assign override_stall_sig_out = reg_override_stall_sig;
-    assign hazard_detected_level_out = reg_hazard_detected_level;
-
+    // These outputs directly drive the next stage (the new FSM)
+    // No need for separate output assigns here since they are declared as logic within the module
+    // and directly assigned in the always_comb block and then registered.
+    // Remove the previous 'assign override_flush_sig_out = reg_override_flush_sig;' style lines.
 endmodule
 
-// ===============================================================================
+// ======================================================================
 // NEW: Entropy Control Logic Module
 // Features:
 // - Directly uses the 16-bit external entropy input from 'entropy_bus.txt'.
@@ -727,7 +752,7 @@ endmodule
 //   These can then be modulated by ML and chaos predictors in the main CPU.
 // ===============================================================================
 module entropy_control_logic(
-    input wire [15:0] external_entropy_in, // CHANGED: 16-bit external entropy from entropy_bus.txt
+    input wire [15:0] external_entropy_in, // 16-bit external entropy from entropy_bus.txt
     output wire entropy_stall,            // Assert to signal a basic entropy-induced stall
     output wire entropy_flush             // Assert to signal a basic entropy-induced flush
 );
@@ -757,7 +782,8 @@ module pipeline_cpu(
     output wire [15:0] debug_instr,     // For debugging: current instruction
     output wire debug_stall,            // For debugging: indicates pipeline stall
     output wire debug_flush,            // For debugging: indicates pipeline flush
-    output wire debug_lock              // For debugging: indicates system lock
+    output wire debug_lock,             // For debugging: indicates system lock
+    output wire [7:0] debug_fsm_entropy_log // For debugging: entropy value logged by new FSM
 );
 
     // --- Active Low Reset for Modules that use it ---
@@ -866,20 +892,22 @@ module pipeline_cpu(
 
     // For simplicity, tracking rough execution pressure: number of active instructions
     reg [7:0] exec_pressure_counter; // Example: count of non-NOPs in flight (simplified)
-    wire [7:0] cache_miss_rate_dummy; // Placeholder for actual cache miss rate. Assume 0-255 scaling.
+    reg [7:0] cache_miss_rate_dummy; // Placeholder for actual cache miss rate. Assume 0-255 scaling.
 
     // AHO internal hazard signals (outputs from AHO)
     wire aho_override_flush_req;
     wire aho_override_stall_req;
     wire [1:0] aho_hazard_level;
 
-    // FSM internal hazard signal (input to FSM)
-    wire fsm_internal_hazard_flag;
-    wire [1:0] fsm_hazard_control_signal; // Output from FSM
+    // Consolidated internal hazard flag for the new FSM
+    wire new_fsm_internal_hazard_flag;
+    wire [1:0] new_fsm_control_signal; // Output from the new entropy-aware FSM
+    wire [7:0] new_fsm_entropy_log;    // Entropy log from the new FSM
 
     // Dummy values for AHO thresholds (these would come from ML inference)
-    localparam AHO_SCALED_FLUSH_THRESH = 16'd15000;
-    localparam AHO_SCALED_STALL_THRESH = 16'd5000;
+    // Updated to match the 21-bit total_combined_hazard_score
+    localparam AHO_SCALED_FLUSH_THRESH = 21'd1000000; // Example: approx halfway of max score
+    localparam AHO_SCALED_STALL_THRESH = 21'd500000;  // Example: approx quarter of max score
 
     // --- Instantiate Sub-modules ---
 
@@ -927,12 +955,14 @@ module pipeline_cpu(
     );
 
     // Branch Target Buffer
+    wire [3:0] if_btb_predicted_next_pc; // From BTB prediction
+    wire if_btb_predicted_taken;   // From BTB prediction
     branch_target_buffer i_btb (
         .clk(clk),
         .reset(reset),
         .pc_in(pc_reg), // Current PC to get prediction for
         .branch_resolved_pc(branch_resolved_pc),
-        .branch_resolved_pc_valid(ex_mem_is_branch_inst_reg), // Valid if it was a branch
+        .branch_resolved_pc_valid(ex_mem_is_branch_inst_reg || ex_mem_is_jump_inst_reg), // Valid if it was a branch or jump
         .branch_resolved_target_pc(branch_resolved_target_pc),
         .branch_resolved_taken(branch_actual_taken),
         .predicted_next_pc(if_btb_predicted_next_pc), // Output from BTB for IF
@@ -943,7 +973,7 @@ module pipeline_cpu(
     wire [3:0] qed_instr_opcode_input; // Extracted opcode for QED
     assign qed_instr_opcode_input = id_ex_instr_reg[15:12]; // Assuming opcode is 4 MSBs of ID/EX instruction
     wire qed_reset = reset; // QED uses active high reset
-    wire [7:0] qed_entropy_score_out; // 8-bit output for AHO
+    wire [7:0] qed_entropy_score_out; // 8-bit output for AHO and new FSM
     quantum_entropy_detector i_qed (
         .clk(clk),
         .reset(qed_reset),
@@ -955,7 +985,7 @@ module pipeline_cpu(
 
     // Chaos Detector
     wire cd_reset = reset; // CD uses active high reset
-    wire [7:0] cd_chaos_score_out; // 8-bit output for AHO
+    wire [15:0] cd_chaos_score_out; // 16-bit output for AHO
     chaos_detector i_chaos_detector (
         .clk(clk),
         .reset(cd_reset),
@@ -983,35 +1013,37 @@ module pipeline_cpu(
         .clk                        (clk),
         .rst_n                      (rst_n), // Active low reset
 
-        .internal_entropy_score_val (qed_entropy_score_out),
+        .internal_entropy_score_val (qed_entropy_score_out), // Now 8-bit
         .chaos_score_val            (cd_chaos_score_out),
         .anomaly_detected_val       (pd_anomaly_detected_out),
 
-        .branch_miss_rate_tracker   (debug_branch_miss_rate), // Use the debug output for now
-        .cache_miss_rate_tracker    (cache_miss_rate_dummy),  // Placeholder (needs actual cache logic)
-        .exec_pressure_tracker      (exec_pressure_counter),  // Use the simplified counter
+        .branch_miss_rate_tracker   (debug_branch_miss_rate), // Use the debug output for now (8-bit)
+        .cache_miss_rate_tracker    (cache_miss_rate_dummy),  // Placeholder (needs actual cache logic) (8-bit)
+        .exec_pressure_tracker      (exec_pressure_counter),  // Use the simplified counter (8-bit)
 
         .ml_predicted_action        (ml_predicted_action),    // From top-level input
         .scaled_flush_threshold     (AHO_SCALED_FLUSH_THRESH), // Fixed for this example, or from ML
         .scaled_stall_threshold     (AHO_SCALED_STALL_THRESH), // Fixed for this example, or from ML
 
-        .override_flush_sig         (aho_override_flush_req), // Output to FSM
-        .override_stall_sig         (aho_override_stall_req), // Output to FSM
+        .override_flush_sig         (aho_override_flush_req), // Output to new FSM
+        .override_stall_sig         (aho_override_stall_req), // Output to new FSM
         .hazard_detected_level      (aho_hazard_level)        // For debug or other system management
     );
 
-    // Probabilistic Hazard FSM
-    // The FSM takes AHO's requests as its 'internal_hazard_flag'
-    assign fsm_internal_hazard_flag = aho_override_flush_req || aho_override_stall_req;
-    probabilistic_hazard_fsm i_ph_fsm (
+    // NEW: Entropy-Aware FSM
+    // Consolidate AHO's requests into a single internal hazard flag for the new FSM
+    assign new_fsm_internal_hazard_flag = aho_override_flush_req || aho_override_stall_req;
+    fsm_entropy_overlay i_entropy_fsm (
         .clk(clk),
         .rst_n(rst_n), // Active low reset
-        .ml_predicted_action(ml_predicted_action), // ML model's prediction
-        .internal_hazard_flag(fsm_internal_hazard_flag),
-        .hazard_control_signal(fsm_hazard_control_signal)
+        .ml_predicted_action(ml_predicted_action),    // ML model's prediction
+        .internal_entropy_score(qed_entropy_score_out), // Entropy score from QED
+        .internal_hazard_flag(new_fsm_internal_hazard_flag),
+        .fsm_state(new_fsm_control_signal),           // Main pipeline control output
+        .entropy_log_out(new_fsm_entropy_log)         // Debug output for entropy logging
     );
 
-    // Entropy Control Logic (for external entropy input)
+    // Entropy Control Logic (for external entropy input) - remains as a separate "base" influence
     wire entropy_ctrl_stall;
     wire entropy_ctrl_flush;
     entropy_control_logic i_entropy_ctrl (
@@ -1020,15 +1052,16 @@ module pipeline_cpu(
         .entropy_flush(entropy_ctrl_flush)
     );
 
-    // --- Pipeline Control Unit (Simplified) ---
-    // Combines all stall/flush requests
-    // Prioritize flush over stall
-    assign pipeline_flush = (fsm_hazard_control_signal == 2'b10) || // FSM requests FLUSH
-                            (fsm_hazard_control_signal == 2'b11) || // FSM requests LOCK (implies FLUSH)
+    // --- Pipeline Control Unit ---
+    // Combines all stall/flush requests, now primarily driven by the new entropy-aware FSM.
+    // External entropy control acts as an additional independent trigger for stall/flush.
+    // Prioritize LOCK > FLUSH > STALL
+    assign pipeline_flush = (new_fsm_control_signal == 2'b10) || // FSM requests FLUSH
+                            (new_fsm_control_signal == 2'b11) || // FSM requests LOCK (implies FLUSH)
                             entropy_ctrl_flush;                     // External entropy requests FLUSH
 
-    assign pipeline_stall = (fsm_hazard_control_signal == 2'b01) || // FSM requests STALL
-                            (fsm_hazard_control_signal == 2'b11) || // FSM requests LOCK (implies STALL)
+    assign pipeline_stall = (new_fsm_control_signal == 2'b01) || // FSM requests STALL
+                            (new_fsm_control_signal == 2'b11) || // FSM requests LOCK (implies STALL)
                             entropy_ctrl_stall;                     // External entropy requests STALL
 
     // --- Execution Pressure Counter (Simplified) ---
@@ -1036,11 +1069,14 @@ module pipeline_cpu(
     always @(posedge clk or posedge reset) begin
         if (reset) begin
             exec_pressure_counter <= 8'h0;
+            cache_miss_rate_dummy <= 8'h0; // Initialize dummy cache miss rate
         end else if (pipeline_flush) begin
             exec_pressure_counter <= 8'h0; // Clear on flush
+            cache_miss_rate_dummy <= 8'h0; // Clear dummy cache miss rate on flush
         end else if (pipeline_stall) begin
             // Hold or slightly decrement
             exec_pressure_counter <= exec_pressure_counter;
+            cache_miss_rate_dummy <= cache_miss_rate_dummy;
         end else begin
             // Assuming opcode 4'h9 is NOP
             if (if_id_instr_reg[15:12] != 4'h9) begin // If instruction is not NOP
@@ -1049,6 +1085,14 @@ module pipeline_cpu(
             end else begin
                 if (exec_pressure_counter > 8'h0)
                     exec_pressure_counter <= exec_pressure_counter - 8'h1;
+            end
+            // Simulate a dummy cache miss rate that fluctuates
+            if ($urandom_range(0, 100) < 5) begin // 5% chance to increase
+                if (cache_miss_rate_dummy < 8'hFF)
+                    cache_miss_rate_dummy <= cache_miss_rate_dummy + 8'h1;
+            end else if ($urandom_range(0, 100) < 10) begin // 10% chance to decrease
+                if (cache_miss_rate_dummy > 8'h0)
+                    cache_miss_rate_dummy <= cache_miss_rate_dummy - 8'h1;
             end
         end
     end
@@ -1067,19 +1111,22 @@ module pipeline_cpu(
         end else if (ex_mem_is_branch_inst_reg) begin // Resolved Branch
             if (branch_actual_taken) begin
                 next_pc = ex_mem_branch_target_reg;
-            end else begin
+            end else { // If not taken or mispredicted (predicted taken but actually not taken)
                 next_pc = ex_mem_pc_plus_1_reg; // Not taken, use PC+1 from EX stage
-            end
+            }
         end else if (if_btb_predicted_taken) begin // BTB Prediction
             next_pc = if_btb_predicted_next_pc;
         end
 
-        // Hazard overrides
-        if (pipeline_flush) begin
+        // Hazard overrides (new FSM has highest priority for pipeline control)
+        if (new_fsm_control_signal == 2'b11) begin // LOCK state
+            next_pc = 4'h0; // Force PC to 0 on lock
+        end else if (new_fsm_control_signal == 2'b10) begin // FLUSH state
             next_pc = 4'h0; // Flush: reset PC to 0 or entry point
-        end else if (pipeline_stall) begin
+        end else if (new_fsm_control_signal == 2'b01) begin // STALL state
             next_pc = pc_reg; // Stall: keep current PC, refetch same instruction
         end
+        // If new_fsm_control_signal is STATE_OK (2'b00), no override, so normal PC flow
     end
 
 
@@ -1254,25 +1301,27 @@ module pipeline_cpu(
     assign branch_resolved_target_pc = ex_mem_branch_target_reg;
 
     // Branch Misprediction Detection
-    wire if_btb_predicted_next_pc; // From BTB prediction
-    wire if_btb_predicted_taken;   // From BTB prediction
+    wire branch_mispredicted_local; // Local wire for branch misprediction
+    assign branch_mispredicted = branch_mispredicted_local; // Assign to top-level wire
 
-    assign branch_mispredicted = 1'b0; // Default to no misprediction
+    always @(*) begin
+        branch_mispredicted_local = 1'b0; // Default to no misprediction
 
-    // Only check misprediction if it was a branch/jump instruction
-    if (ex_mem_is_branch_inst_reg || ex_mem_is_jump_inst_reg) begin
-        if (ex_mem_is_branch_inst_reg) begin // Conditional branch (BEQ)
-            // Misprediction if predicted taken != actual taken
-            // OR if predicted target != actual target (if taken)
-            if (if_btb_predicted_taken != branch_actual_taken) begin
-                branch_mispredicted = 1'b1;
-            end else if (branch_actual_taken && (if_btb_predicted_next_pc != branch_resolved_target_pc)) begin
-                branch_mispredicted = 1'b1;
-            end
-        end else if (ex_mem_is_jump_inst_reg) begin // Unconditional jump
-            // Misprediction if predicted target != actual target
-            if (if_btb_predicted_next_pc != branch_resolved_target_pc) begin
-                branch_mispredicted = 1'b1;
+        // Only check misprediction if it was a branch/jump instruction that completed EX stage
+        if (ex_mem_is_branch_inst_reg || ex_mem_is_jump_inst_reg) begin
+            if (ex_mem_is_branch_inst_reg) begin // Conditional branch (BEQ)
+                // Misprediction if predicted taken != actual taken
+                // OR if predicted target != actual target (if taken)
+                if (if_btb_predicted_taken != branch_actual_taken) begin
+                    branch_mispredicted_local = 1'b1;
+                end else if (branch_actual_taken && (if_btb_predicted_next_pc != branch_resolved_target_pc)) begin
+                    branch_mispredicted_local = 1'b1;
+                end
+            end else if (ex_mem_is_jump_inst_reg) begin // Unconditional jump
+                // Misprediction if predicted target != actual target
+                if (if_btb_predicted_next_pc != branch_resolved_target_pc) begin
+                    branch_mispredicted_local = 1'b1;
+                end
             end
         end
     end
@@ -1316,6 +1365,7 @@ module pipeline_cpu(
     assign debug_instr = if_instr; // Or if_id_instr_reg, depending on desired debug point
     assign debug_stall = pipeline_stall;
     assign debug_flush = pipeline_flush;
-    assign debug_lock = (fsm_hazard_control_signal == 2'b11); // Directly from FSM lock state
+    assign debug_lock = (new_fsm_control_signal == 2'b11); // Directly from new FSM lock state
+    assign debug_fsm_entropy_log = new_fsm_entropy_log; // New debug output for entropy logging
 
 endmodule
