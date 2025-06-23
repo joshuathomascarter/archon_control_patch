@@ -447,6 +447,15 @@ module fsm_entropy_overlay(
     input wire [7:0] internal_entropy_score, // 8-bit internal entropy score (from QED)
     input wire internal_hazard_flag, // 1-bit hazard detected by AHO or traditional CPU logic (consolidated)
 
+    // START OF ADDED PARTS: Analog Override Inputs
+    input wire analog_lock_override,  // Active high signal from analog controller for LOCK_OUT
+    input wire analog_flush_override, // Active high signal from analog controller for FLUSH_OUT
+    // END OF ADDED PARTS
+
+    // START OF ADDED PARTS: New input for classified entropy level
+    input wire [1:0] classified_entropy_level, // 2-bit input from entropy_trigger_decoder
+    // END OF ADDED PARTS
+
     output reg [1:0] fsm_state,      // 2-bit FSM output: 00=OK, 01=STALL, 10=FLUSH, 11=LOCK
     output reg [7:0] entropy_log_out // 8-bit pass-through or masked entropy snapshot at transition
 );
@@ -460,6 +469,12 @@ module fsm_entropy_overlay(
     // Entropy Threshold for False Negative Simulation
     // If entropy is very high, even if ML says OK, we trigger a STALL.
     parameter ENTROPY_HIGH_THRESHOLD = 8'd180; // Threshold for triggering STALL on ML_OK
+
+    // Parameters for classified_entropy_level
+    parameter ENTROPY_LOW      = 2'b00;
+    parameter ENTROPY_MID      = 2'b01;
+    parameter ENTROPY_CRITICAL = 2'b10;
+
 
     reg [1:0] current_state;
     reg [1:0] next_state;
@@ -490,65 +505,89 @@ module fsm_entropy_overlay(
     always @(*) begin
         next_state = current_state; // Default: stay in current state (unless a transition condition is met)
 
-        case (current_state)
-            STATE_OK: begin
-                // From OK state, ML predictions or internal hazards can trigger transitions.
-                case (ml_predicted_action)
-                    STATE_STALL: next_state = STATE_STALL; // ML predicts STALL
-                    STATE_FLUSH: next_state = STATE_FLUSH; // ML predicts FLUSH
-                    STATE_LOCK:  next_state = STATE_LOCK;  // ML predicts OVERRIDE -> LOCK
-                    default: begin // This 'default' handles 2'b00 (OK) or any other unexpected ML input
-                        // Bonus Detail: Simulate a false negative with entropy override
-                        if (ml_predicted_action == STATE_OK && internal_entropy_score > ENTROPY_HIGH_THRESHOLD) begin
-                            next_state = STATE_STALL; // High entropy overrides ML_OK, triggers STALL
-                        end else if (internal_hazard_flag) begin
-                            next_state = STATE_STALL; // Traditional/combined hazard -> STALL
-                        end else begin
-                            next_state = STATE_OK; // No ML action, no internal hazard, low entropy -> Stay OK
-                        end
+        // Priority 1: High-priority Analog Overrides (Highest Priority)
+        if (analog_lock_override) begin // LOCK_OUT from analog controller
+            next_state = STATE_LOCK; // Highest priority: Force system to LOCK state
+        end else if (analog_flush_override) begin // FLUSH_OUT from analog controller
+            next_state = STATE_FLUSH; // High priority: Force a pipeline flush
+        // END OF PREVIOUSLY ADDED PARTS
+        end else begin
+            // Priority 2: Classified Entropy Level (New Priority Tier)
+            // This allows the decoder's classified output to directly influence FSM state
+            case (classified_entropy_level)
+                ENTROPY_CRITICAL: begin
+                    next_state = STATE_FLUSH; // Critical entropy forces a flush if not already locked by analog
+                end
+                ENTROPY_MID: begin
+                    if (current_state == STATE_OK) begin
+                        next_state = STATE_STALL; // Mid entropy forces a stall if currently OK
                     end
-                endcase
-            end
-
-            STATE_STALL: begin
-                // From STALL state, ML can escalate to FLUSH/LOCK, or de-escalate to OK.
-                case (ml_predicted_action)
-                    STATE_FLUSH: next_state = STATE_FLUSH; // ML predicts FLUSH (escalate)
-                    STATE_LOCK:  next_state = STATE_LOCK;  // ML predicts OVERRIDE -> LOCK
-                    default: begin // Handles ML OK (00) or ML STALL (01) or other unexpected
-                        if (ml_predicted_action == STATE_OK && !internal_hazard_flag && internal_entropy_score <= ENTROPY_HIGH_THRESHOLD) begin
-                            next_state = STATE_OK; // ML predicts OK, no internal hazard, low entropy -> Return to OK
-                        end else begin
-                            next_state = STATE_STALL; // Otherwise, remain stalled (ML still recommends STALL or hazard persists)
+                end
+                default: begin
+                    // If entropy is LOW, proceed to evaluate ML predictions and internal hazards
+                    // This 'default' handles ENTROPY_LOW (2'b00) or any unused 2'b11 encoding
+                    case (current_state)
+                        STATE_OK: begin
+                            // From OK state, ML predictions or internal hazards can trigger transitions.
+                            case (ml_predicted_action)
+                                STATE_STALL: next_state = STATE_STALL; // ML predicts STALL
+                                STATE_FLUSH: next_state = STATE_FLUSH; // ML predicts FLUSH
+                                STATE_LOCK:  next_state = STATE_LOCK;  // ML predicts OVERRIDE -> LOCK
+                                default: begin // This 'default' handles 2'b00 (OK) or any other unexpected ML input
+                                    // Bonus Detail: Simulate a false negative with entropy override
+                                    if (ml_predicted_action == STATE_OK && internal_entropy_score > ENTROPY_HIGH_THRESHOLD) begin
+                                        next_state = STATE_STALL; // High entropy overrides ML_OK, triggers STALL
+                                    end else if (internal_hazard_flag) begin
+                                        next_state = STATE_STALL; // Traditional/combined hazard -> STALL
+                                    end else begin
+                                        next_state = STATE_OK; // No ML action, no internal hazard, low entropy -> Stay OK
+                                    end
+                                end
+                            endcase
                         end
-                    end
-                endcase
-            end
 
-            STATE_FLUSH: begin
-                // From FLUSH state, ML can escalate to LOCK, or de-escalate to STALL/OK.
-                case (ml_predicted_action)
-                    STATE_LOCK: next_state = STATE_LOCK; // ML predicts OVERRIDE -> LOCK
-                    default: begin // Handles ML OK (00), ML STALL (01), ML FLUSH (10), or other unexpected
-                        if (ml_predicted_action == STATE_OK && !internal_hazard_flag && internal_entropy_score <= ENTROPY_HIGH_THRESHOLD) begin
-                            next_state = STATE_OK; // ML predicts OK, no internal hazard, low entropy -> Return to OK
-                        end else if (ml_predicted_action == STATE_STALL) begin
-                            next_state = STATE_STALL; // ML predicts STALL -> Transition to STALL after flush
-                        end else begin
-                            next_state = STATE_FLUSH; // Otherwise, remain flushing (e.g., ML insists FLUSH, or unexpected input)
+                        STATE_STALL: begin
+                            // From STALL state, ML can escalate to FLUSH/LOCK, or de-escalate to OK.
+                            case (ml_predicted_action)
+                                STATE_FLUSH: next_state = STATE_FLUSH; // ML predicts FLUSH (escalate)
+                                STATE_LOCK:  next_state = STATE_LOCK;  // ML predicts OVERRIDE -> LOCK
+                                default: begin // Handles ML OK (00) or ML STALL (01) or other unexpected
+                                    if (ml_predicted_action == STATE_OK && !internal_hazard_flag && internal_entropy_score <= ENTROPY_HIGH_THRESHOLD) begin
+                                        next_state = STATE_OK; // ML predicts OK, no internal hazard, low entropy -> Return to OK
+                                    end else begin
+                                        next_state = STATE_STALL; // Otherwise, remain stalled (ML still recommends STALL or hazard persists)
+                                    end
+                                end
+                            endcase
                         end
-                    end
-                endcase
-            end
 
-            STATE_LOCK: begin
-                // Once in LOCK, the FSM is designed to remain in LOCK.
-                // Exiting LOCK state requires an explicit external hardware reset (rst_n).
-                next_state = STATE_LOCK;
-            end
+                        STATE_FLUSH: begin
+                            // From FLUSH state, ML can escalate to LOCK, or de-escalate to STALL/OK.
+                            case (ml_predicted_action)
+                                STATE_LOCK: next_state = STATE_LOCK; // ML predicts OVERRIDE -> LOCK
+                                default: begin // Handles ML OK (00), ML STALL (01), ML FLUSH (10), or other unexpected
+                                    if (ml_predicted_action == STATE_OK && !internal_hazard_flag && internal_entropy_score <= ENTROPY_HIGH_THRESHOLD) begin
+                                        next_state = STATE_OK; // ML predicts OK, no internal hazard, low entropy -> Return to OK
+                                    end else if (ml_predicted_action == STATE_STALL) begin
+                                        next_state = STATE_STALL; // ML predicts STALL -> Transition to STALL after flush
+                                    end else begin
+                                        next_state = STATE_FLUSH; // Otherwise, remain flushing (e.g., ML insists FLUSH, or unexpected input)
+                                    end
+                                end
+                            endcase
+                        end
 
-            default: next_state = STATE_OK; // Fallback for undefined 'current_state' (should not happen in synthesizable code)
-        endcase
+                        STATE_LOCK: begin
+                            // Once in LOCK, the FSM is designed to remain in LOCK.
+                            // Exiting LOCK state requires an explicit external hardware reset (rst_n).
+                            next_state = STATE_LOCK;
+                        end
+
+                        default: next_state = STATE_OK; // Fallback for undefined 'current_state' (should not happen in synthesizable code)
+                    endcase
+                end // END of default for classified_entropy_level
+            endcase
+        end // END of 'else' for analog override
     end
 
     // --- Output Logic: Combinational ---
@@ -778,6 +817,11 @@ module pipeline_cpu(
     input wire [15:0] external_entropy_in, // Input from entropy_bus.txt (for Entropy Control Logic)
     input wire [1:0] ml_predicted_action, // ML model's predicted action for AHO and FSM
 
+    // START OF ADDED PARTS: Analog Override Inputs for pipeline_cpu
+    input wire analog_lock_override_in,  // From top-level analog controller
+    input wire analog_flush_override_in, // From top-level analog controller
+    // END OF ADDED PARTS
+
     output wire [3:0] debug_pc,         // For debugging: current PC
     output wire [15:0] debug_instr,     // For debugging: current instruction
     output wire debug_stall,            // For debugging: indicates pipeline stall
@@ -909,6 +953,10 @@ module pipeline_cpu(
     localparam AHO_SCALED_FLUSH_THRESH = 21'd1000000; // Example: approx halfway of max score
     localparam AHO_SCALED_STALL_THRESH = 21'd500000;  // Example: approx quarter of max score
 
+    // START OF ADDED PARTS: Wire for classified entropy level
+    wire [1:0] classified_entropy_level_wire;
+    // END OF ADDED PARTS
+
     // --- Instantiate Sub-modules ---
 
     // Instruction Memory
@@ -1030,6 +1078,13 @@ module pipeline_cpu(
         .hazard_detected_level      (aho_hazard_level)        // For debug or other system management
     );
 
+    // START OF ADDED PARTS: Instantiate entropy_trigger_decoder
+    entropy_trigger_decoder i_entropy_decoder (
+        .entropy_in(qed_entropy_score_out),        // Connect QED output to decoder input
+        .signal_class(classified_entropy_level_wire) // Output to new wire
+    );
+    // END OF ADDED PARTS
+
     // NEW: Entropy-Aware FSM
     // Consolidate AHO's requests into a single internal hazard flag for the new FSM
     assign new_fsm_internal_hazard_flag = aho_override_flush_req || aho_override_stall_req;
@@ -1039,6 +1094,13 @@ module pipeline_cpu(
         .ml_predicted_action(ml_predicted_action),    // ML model's prediction
         .internal_entropy_score(qed_entropy_score_out), // Entropy score from QED
         .internal_hazard_flag(new_fsm_internal_hazard_flag),
+        // START OF ADDED PARTS: Passing analog override inputs to FSM
+        .analog_lock_override(analog_lock_override_in),
+        .analog_flush_override(analog_flush_override_in),
+        // END OF ADDED PARTS
+        // START OF ADDED PARTS: Pass classified entropy level to FSM
+        .classified_entropy_level(classified_entropy_level_wire),
+        // END OF ADDED PARTS
         .fsm_state(new_fsm_control_signal),           // Main pipeline control output
         .entropy_log_out(new_fsm_entropy_log)         // Debug output for entropy logging
     );
@@ -1316,14 +1378,14 @@ module pipeline_cpu(
                     branch_mispredicted_local = 1'b1;
                 end else if (branch_actual_taken && (if_btb_predicted_next_pc != branch_resolved_target_pc)) begin
                     branch_mispredicted_local = 1'b1;
-                end
+                }
             end else if (ex_mem_is_jump_inst_reg) begin // Unconditional jump
                 // Misprediction if predicted target != actual target
                 if (if_btb_predicted_next_pc != branch_resolved_target_pc) begin
                     branch_mispredicted_local = 1'b1;
-                end
+                }
             end
-        end
+        }
     end
 
     // For debugging branch miss rate
@@ -1367,5 +1429,32 @@ module pipeline_cpu(
     assign debug_flush = pipeline_flush;
     assign debug_lock = (new_fsm_control_signal == 2'b11); // Directly from new FSM lock state
     assign debug_fsm_entropy_log = new_fsm_entropy_log; // New debug output for entropy logging
+
+endmodule
+
+
+// ===============================================================================
+// NEW MODULE: entropy_trigger_decoder.v
+// Purpose: Simulates compression of incoming analog entropy signals (8-bit)
+//          into meaningful trigger vectors or score levels (2-bit).
+// ===============================================================================
+module entropy_trigger_decoder(
+    input wire [7:0] entropy_in,    // 8-bit entropy score (0-255)
+    output reg [1:0] signal_class   // 2-bit output: 00 = LOW, 01 = MID, 10 = CRITICAL
+);
+
+    // Define thresholds for classification
+    parameter THRESHOLD_LOW_TO_MID = 8'd85;     // Up to 85 is LOW
+    parameter THRESHOLD_MID_TO_CRITICAL = 8'd170; // Up to 170 is MID, above is CRITICAL
+
+    always @(*) begin
+        if (entropy_in <= THRESHOLD_LOW_TO_MID) begin
+            signal_class = 2'b00; // LOW
+        end else if (entropy_in <= THRESHOLD_MID_TO_CRITICAL) begin
+            signal_class = 2'b01; // MID
+        end else begin
+            signal_class = 2'b10; // CRITICAL
+        end
+    end
 
 endmodule
