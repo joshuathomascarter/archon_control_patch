@@ -452,12 +452,15 @@ module fsm_entropy_overlay(
     input wire analog_flush_override, // Active high signal from analog controller for FLUSH_OUT
     // END OF ADDED PARTS
 
-    // START OF ADDED PARTS: New input for classified entropy level
+    // START OF ADDED PARTS: New input for classified entropy level and Quantum Override
     input wire [1:0] classified_entropy_level, // 2-bit input from entropy_trigger_decoder
+    input wire quantum_override_signal, // 1-bit input from quantum override circuit
+    input wire [2:0] instr_type, // NEW: 3-bit instruction type (000=ALU, 001=LOAD, 010=STORE, 011=BRANCH, 100=JUMP)
     // END OF ADDED PARTS
 
     output reg [1:0] fsm_state,      // 2-bit FSM output: 00=OK, 01=STALL, 10=FLUSH, 11=LOCK
-    output reg [7:0] entropy_log_out // 8-bit pass-through or masked entropy snapshot at transition
+    output reg [7:0] entropy_log_out, // 8-bit pass-through or masked entropy snapshot at transition
+    output reg [2:0] instr_type_log_out // NEW: Logged instruction type at transition
 );
 
     // FSM States
@@ -475,6 +478,13 @@ module fsm_entropy_overlay(
     parameter ENTROPY_MID      = 2'b01;
     parameter ENTROPY_CRITICAL = 2'b10;
 
+    // Parameters for instr_type
+    parameter INSTR_TYPE_ALU    = 3'b000;
+    parameter INSTR_TYPE_LOAD   = 3'b001;
+    parameter INSTR_TYPE_STORE  = 3'b010;
+    parameter INSTR_TYPE_BRANCH = 3'b011;
+    parameter INSTR_TYPE_JUMP   = 3'b100;
+    // 3'b101-3'b111 are RESERVED / Other
 
     reg [1:0] current_state;
     reg [1:0] next_state;
@@ -486,15 +496,18 @@ module fsm_entropy_overlay(
         if (!rst_n) begin // If reset is active (low)
             current_state <= STATE_OK; // Reset to the OK state
             entropy_log_out <= 8'h00; // Reset log output
+            instr_type_log_out <= 3'b000; // Reset instr type log
         end else begin
             current_state <= next_state; // Otherwise, update state on clock edge
 
-            // Log entropy on state transition
-            // This captures the entropy score right before the new state is adopted.
+            // Log entropy and instruction type on state transition
+            // This captures the entropy score and instruction type right before the new state is adopted.
             if (next_state != current_state) begin
                 entropy_log_out <= internal_entropy_score;
+                instr_type_log_out <= instr_type;
             end else begin
                 entropy_log_out <= 8'h00; // Clear log if no transition to indicate stable state
+                instr_type_log_out <= 3'b000; // Clear instr type log
             end
         end
     end
@@ -505,27 +518,57 @@ module fsm_entropy_overlay(
     always @(*) begin
         next_state = current_state; // Default: stay in current state (unless a transition condition is met)
 
-        // Priority 1: High-priority Analog Overrides (Highest Priority)
-        if (analog_lock_override) begin // LOCK_OUT from analog controller
-            next_state = STATE_LOCK; // Highest priority: Force system to LOCK state
-        end else if (analog_flush_override) begin // FLUSH_OUT from analog controller
-            next_state = STATE_FLUSH; // High priority: Force a pipeline flush
-        // END OF PREVIOUSLY ADDED PARTS
+        // Priority 0: Quantum Override (Highest Possible Priority)
+        // A quantum override signal signifies the most fundamental system integrity issue
+        // (e.g., entanglement collapse due to extreme noise/decoherence).
+        // This should immediately force a LOCK state, overriding all other conditions.
+        if (quantum_override_signal) begin
+            next_state = STATE_LOCK;
+        end else if (analog_lock_override) begin // Priority 1: Analog LOCK_OUT (Next Highest Priority)
+            next_state = STATE_LOCK; // Force system to LOCK state
+        end else if (analog_flush_override) begin // Priority 2: Analog FLUSH_OUT (Third Highest Priority)
+            next_state = STATE_FLUSH; // Force a pipeline flush
         end else begin
-            // Priority 2: Classified Entropy Level (New Priority Tier)
-            // This allows the decoder's classified output to directly influence FSM state
+            // Priority 3: Classified Entropy Level & Instruction Type Specific Rules
+            // This tier incorporates more nuanced, context-aware decisions.
             case (classified_entropy_level)
                 ENTROPY_CRITICAL: begin
-                    next_state = STATE_FLUSH; // Critical entropy forces a flush if not already locked by analog
+                    // If entropy is CRITICAL, this is a strong indicator of instability.
+                    // React aggressively based on instruction type.
+                    case (instr_type)
+                        INSTR_TYPE_BRANCH, INSTR_TYPE_JUMP: next_state = STATE_STALL; // BRANCH/JUMP on CRITICAL -> aggressive STALL
+                        INSTR_TYPE_LOAD, INSTR_TYPE_STORE: next_state = STATE_FLUSH;  // LOAD/STORE on CRITICAL -> FLUSH (data integrity risk)
+                        INSTR_TYPE_ALU: begin
+                            if (internal_hazard_flag) next_state = STATE_STALL; // ALU on CRITICAL, only STALL if AHO reports hazard
+                            else next_state = current_state; // Otherwise, lenient if no other specific trigger
+                        end
+                        default: next_state = STATE_FLUSH; // Default to flush for unknown/reserved types on critical entropy
+                    endcase
                 end
                 ENTROPY_MID: begin
-                    if (current_state == STATE_OK) begin
-                        next_state = STATE_STALL; // Mid entropy forces a stall if currently OK
-                    end
+                    // If entropy is MID, we're watchful. React less aggressively, but still cautious.
+                    case (instr_type)
+                        INSTR_TYPE_BRANCH, INSTR_TYPE_JUMP: begin
+                            if (current_state == STATE_OK) next_state = STATE_STALL; // Only STALL if currently OK
+                            else next_state = current_state; // Otherwise, maintain current non-OK state
+                        end
+                        INSTR_TYPE_LOAD, INSTR_TYPE_STORE: begin
+                            if (current_state == STATE_OK || current_state == STATE_STALL) next_state = STATE_STALL; // Prefer STALL on MID for mem ops
+                            else next_state = current_state;
+                        end
+                        INSTR_TYPE_ALU: begin
+                            if (internal_hazard_flag) next_state = STATE_STALL; // Only STALL if AHO reports hazard
+                            else next_state = current_state; // Otherwise, remain lenient
+                        end
+                        default: begin // For unknown/reserved types on MID entropy
+                            if (internal_hazard_flag && current_state == STATE_OK) next_state = STATE_STALL;
+                            else next_state = current_state;
+                        end
+                    endcase
                 end
-                default: begin
-                    // If entropy is LOW, proceed to evaluate ML predictions and internal hazards
-                    // This 'default' handles ENTROPY_LOW (2'b00) or any unused 2'b11 encoding
+                default: begin // ENTROPY_LOW (2'b00) or any unused 2'b11 encoding for classified_entropy_level
+                    // If entropy is LOW (or unclassified/reserved), proceed to evaluate ML predictions and internal hazards
+                    // This is the default path when no critical entropy or specific instruction type overrides are active.
                     case (current_state)
                         STATE_OK: begin
                             // From OK state, ML predictions or internal hazards can trigger transitions.
@@ -536,7 +579,7 @@ module fsm_entropy_overlay(
                                 default: begin // This 'default' handles 2'b00 (OK) or any other unexpected ML input
                                     // Bonus Detail: Simulate a false negative with entropy override
                                     if (ml_predicted_action == STATE_OK && internal_entropy_score > ENTROPY_HIGH_THRESHOLD) begin
-                                        next_state = STATE_STALL; // High entropy overrides ML_OK, triggers STALL
+                                        next_state = STATE_STALL; // High internal entropy overrides ML_OK, triggers STALL
                                     end else if (internal_hazard_flag) begin
                                         next_state = STATE_STALL; // Traditional/combined hazard -> STALL
                                     end else begin
@@ -587,7 +630,7 @@ module fsm_entropy_overlay(
                     endcase
                 end // END of default for classified_entropy_level
             endcase
-        end // END of 'else' for analog override
+        end // END of 'else' for quantum/analog override
     end
 
     // --- Output Logic: Combinational ---
@@ -817,9 +860,10 @@ module pipeline_cpu(
     input wire [15:0] external_entropy_in, // Input from entropy_bus.txt (for Entropy Control Logic)
     input wire [1:0] ml_predicted_action, // ML model's predicted action for AHO and FSM
 
-    // START OF ADDED PARTS: Analog Override Inputs for pipeline_cpu
+    // START OF ADDED PARTS: Analog Override Inputs for pipeline_cpu and Quantum Override
     input wire analog_lock_override_in,  // From top-level analog controller
     input wire analog_flush_override_in, // From top-level analog controller
+    input wire quantum_override_signal_in, // NEW: Quantum override signal from Qiskit simulation
     // END OF ADDED PARTS
 
     output wire [3:0] debug_pc,         // For debugging: current PC
@@ -827,7 +871,8 @@ module pipeline_cpu(
     output wire debug_stall,            // For debugging: indicates pipeline stall
     output wire debug_flush,            // For debugging: indicates pipeline flush
     output wire debug_lock,             // For debugging: indicates system lock
-    output wire [7:0] debug_fsm_entropy_log // For debugging: entropy value logged by new FSM
+    output wire [7:0] debug_fsm_entropy_log, // For debugging: entropy value logged by new FSM
+    output wire [2:0] debug_fsm_instr_type_log // NEW: Debug output for logged instruction type
 );
 
     // --- Active Low Reset for Modules that use it ---
@@ -860,6 +905,10 @@ module pipeline_cpu(
     wire id_is_branch_inst;      // Decoded as a branch instruction
     wire id_is_jump_inst;        // Decoded as a jump instruction
     wire [3:0] id_branch_target; // Branch target from instruction (simplified 3-bit to 4-bit)
+
+    // START OF ADDED PARTS: Wire for mapped instruction type
+    wire [2:0] instr_type_to_fsm_wire;
+    // END OF ADDED PARTS
 
     // ID/EX Pipeline Register
     reg [3:0] id_ex_pc_plus_1_reg;
@@ -947,6 +996,7 @@ module pipeline_cpu(
     wire new_fsm_internal_hazard_flag;
     wire [1:0] new_fsm_control_signal; // Output from the new entropy-aware FSM
     wire [7:0] new_fsm_entropy_log;    // Entropy log from the new FSM
+    wire [2:0] new_fsm_instr_type_log; // NEW: Instruction type log from the new FSM
 
     // Dummy values for AHO thresholds (these would come from ML inference)
     // Updated to match the 21-bit total_combined_hazard_score
@@ -1078,11 +1128,23 @@ module pipeline_cpu(
         .hazard_detected_level      (aho_hazard_level)        // For debug or other system management
     );
 
-    // START OF ADDED PARTS: Instantiate entropy_trigger_decoder
+    // Instantiate entropy_trigger_decoder
     entropy_trigger_decoder i_entropy_decoder (
         .entropy_in(qed_entropy_score_out),        // Connect QED output to decoder input
         .signal_class(classified_entropy_level_wire) // Output to new wire
     );
+
+    // START OF ADDED PARTS: Map id_opcode (4-bit) to instr_type (3-bit) for FSM
+    always @(*) begin
+        case (id_opcode)
+            4'h1, 4'h2, 4'h3, 4'h6: instr_type_to_fsm_wire = 3'b000; // ADD, ADDI, SUB, XOR -> ALU
+            4'h4:                   instr_type_to_fsm_wire = 3'b001; // LD -> LOAD
+            4'h5:                   instr_type_to_fsm_wire = 3'b010; // ST -> STORE
+            4'h7:                   instr_type_to_fsm_wire = 3'b011; // BEQ -> BRANCH
+            4'h8:                   instr_type_to_fsm_wire = 3'b100; // JUMP -> JUMP
+            default:                instr_type_to_fsm_wire = 3'b111; // Reserved/Other
+        endcase
+    end
     // END OF ADDED PARTS
 
     // NEW: Entropy-Aware FSM
@@ -1094,15 +1156,16 @@ module pipeline_cpu(
         .ml_predicted_action(ml_predicted_action),    // ML model's prediction
         .internal_entropy_score(qed_entropy_score_out), // Entropy score from QED
         .internal_hazard_flag(new_fsm_internal_hazard_flag),
-        // START OF ADDED PARTS: Passing analog override inputs to FSM
+        // START OF ADDED PARTS: Passing analog, quantum, and instruction type inputs to FSM
         .analog_lock_override(analog_lock_override_in),
         .analog_flush_override(analog_flush_override_in),
-        // END OF ADDED PARTS
-        // START OF ADDED PARTS: Pass classified entropy level to FSM
-        .classified_entropy_level(classified_entropy_level_wire),
+        .classified_entropy_level(classified_entropy_level_wire), // Pass classified entropy level to FSM
+        .quantum_override_signal(quantum_override_signal_in), // Pass quantum override signal to FSM
+        .instr_type(instr_type_to_fsm_wire), // NEW: Pass mapped instruction type to FSM
         // END OF ADDED PARTS
         .fsm_state(new_fsm_control_signal),           // Main pipeline control output
-        .entropy_log_out(new_fsm_entropy_log)         // Debug output for entropy logging
+        .entropy_log_out(new_fsm_entropy_log),         // Debug output for entropy logging
+        .instr_type_log_out(new_fsm_instr_type_log)    // NEW: Debug output for instruction type logging
     );
 
     // Entropy Control Logic (for external entropy input) - remains as a separate "base" influence
@@ -1429,6 +1492,7 @@ module pipeline_cpu(
     assign debug_flush = pipeline_flush;
     assign debug_lock = (new_fsm_control_signal == 2'b11); // Directly from new FSM lock state
     assign debug_fsm_entropy_log = new_fsm_entropy_log; // New debug output for entropy logging
+    assign debug_fsm_instr_type_log = new_fsm_instr_type_log; // NEW: Debug output for logged instruction type
 
 endmodule
 
