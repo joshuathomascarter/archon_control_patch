@@ -6,7 +6,7 @@ This repository provides a set of tools and Verilog code for generating and inte
 
 1.  **`generate_entropy_bus.py`**: A Python script designed to generate a stream of **16-bit** entropy values.
 2.  **`entropy_bus.txt`**: The binary output file produced by the Python script, containing the generated entropy data. This file serves as the "entropy bus" input for the Verilog simulation.
-3.  **`control_unit.rs`**: This file, despite its `.rs` extension, contains **Verilog** code for a CPU's control unit and associated modules. It is updated to read the external entropy conceptually and integrate it into the hazard control logic.
+3.  **`control_unit.rs`**: This file, contains **Verilog** code for a CPU's control unit and associated modules. It is updated to read the external entropy conceptually and integrate it into the hazard control logic.
 
 ## Why This Matters
 
