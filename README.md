@@ -1,29 +1,135 @@
-# Entropy Verilog Bridge Project
+# Verilog Entropy-Aware Pipeline Control
 
-This repository provides a set of tools and Verilog code for generating and integrating an "entropy bus" into a pipelined CPU design, primarily aimed at hardware simulation (e.g., using Verilog simulators). The project enhances the CPU's hazard mitigation system by allowing external, potentially unpredictable, data (entropy) to dynamically influence control logic such as pipeline stalls and flushes.
+This repository implements a Verilog-based 5-stage CPU pipeline (`IF`, `ID`, `EX`, `MEM`, `WB`) with adaptive hazard mitigation. It leverages machine learning (ML), quantum entropy detection, chaos monitoring, and analog/quantum overrides for enhanced resilience and security.
 
-## Project Components
+---
 
-1.  **`generate_entropy_bus.py`**: A Python script designed to generate a stream of **16-bit** entropy values.
-2.  **`entropy_bus.txt`**: The binary output file produced by the Python script, containing the generated entropy data. This file serves as the "entropy bus" input for the Verilog simulation.
-3.  **`control_unit.rs`**: This file, contains **Verilog** code for a CPU's control unit and associated modules. It is updated to read the external entropy conceptually and integrate it into the hazard control logic.
+## 📦 Project Overview
 
-## Why This Matters
+The **ARCHON** architecture integrates:
 
-Incorporating external entropy or unpredictable data into hardware control systems offers significant advantages, especially in complex designs related to security, adaptive performance, and robust system behavior.
+- **Entropy-Aware FSM**  
+  Dynamically adjusts pipeline states: `Normal`, `Stall`, `Flush`, and `Lock`.
 
-**Key Applications/Benefits:**
+- **ML Predictions**  
+  Uses LSTM models to predict chaos-induced hazards.
 
-* **Adaptive Performance**: Dynamically adjusting pipeline behavior (stalls/flushes) based on real-time entropy levels. This allows the pipeline to react to unpredictable system conditions or external factors.
-* **Chaos Engineering/Testing**: Injecting controlled "noise" or random values into the system to test its resilience and stability under non-ideal, chaotic conditions.
-* **Intelligent Hazard Mitigation**: Creating a multi-faceted control system where simple entropy thresholds are combined with advanced predictions from Machine Learning (ML) models and chaos detectors, leading to more sophisticated and resilient hazard mitigation.
-* **Security**: While simple entropy for pipeline control isn't direct cryptographic randomness, it lays groundwork for incorporating true random number generators (TRNGs) for security-critical applications within hardware.
+- **Quantum Overrides**  
+  High-priority lock signals triggered by entangled state measurements.
 
-## `generate_entropy_bus.py`
+- **Testbench Suite**  
+  Comprehensive testing under diverse entropy, anomaly, and override conditions.
 
-This Python script generates a sequence of **16-bit** entropy values and saves them to a binary file.
+---
 
-### Usage:
+## ✨ Features
 
-```bash
-python generate_entropy_bus.py --output entropy_bus.txt --samples 1000 --noisy
+- Adaptive hazard mitigation using real-time entropy and ML inputs  
+- Modular Verilog design with Python-based co-simulation  
+- Support for external entropy injection and quantum override triggers  
+- Verbose logging for state transitions and override paths  
+
+---
+
+## 🚀 Getting Started
+
+### 🔧 Prerequisites
+
+- Verilog Simulator (e.g., **VCS**, **ModelSim**, or **EDA Playground**)
+- Python 3.x
+- Python Libraries:
+  - `tensorflow`
+  - `numpy`
+  - `qiskit` (optional, for quantum simulation)
+
+---
+
+### 📥 Installation
+
+1. **Clone the repository**
+
+   ```bash
+   git clone <repo-url>
+   cd <repo-name>
+   
+2. Install Python dependencies
+- pip install tensorflow numpy qiskit
+- Compile Verilog files
+
+3. vcs -f filelist.f
+▶️ Running the Project
+- Generate Entropy Data
+- python generate_entropy_bus.py
+  
+4. Run ML–Verilog Co-simulation
+- python ml_verilog_cosim.py
+  
+5. Execute Verilog Testbench
+./simv
+
+# 📂 Files
+Verilog Modules
+- archon_top.v — Top-level CPU pipeline integration
+
+- archon_top_testbench.v — Testbench with entropy and override simulation
+
+- control_unit.v — Entropy-aware FSM and pipeline control logic
+
+- pipeline_cpu.v — 5-stage RISC-style pipeline implementation
+
+# Other submodules:
+
+- instruction_ram.v
+
+- alu_unit.v
+
+- fsm_entropy_overlay.v
+
+# Python Scripts
+- chaos_lstm_predictor.py — Predicts hazard scores from entropy features
+
+ - generate_entropy_bus.py — Injects runtime entropy sequences
+
+- ml_verilog_cosim.py — Interfaces Python ML with Verilog simulations
+
+- pattern_detector.py — Flags anomalous execution patterns
+
+- quantum_override_circuit.py — Simulates quantum trigger inputs
+
+# Documentation
+- Paper 4/... — ModelSim results, architecture diagrams, and analysis
+
+- quantum_override_writeup.docx — Design report on quantum logic integration
+
+# 🧪 Usage Scenarios
+- Scenario	Description
+- Normal Operation	Validates baseline CPU flow and FSM transitions
+- ML-Predicted Stall/Flush/Lock	Triggers adaptive hazard mitigation
+- High Entropy	Simulates chaotic inputs to test system robustness
+- Quantum Override	Forces immediate lock/recovery transitions via entangled state
+
+# 🐞 Debugging Tips
+- Monitor the following signals in the testbench logs:
+
+- debug_pc_out
+
+- debug_fsm_entropy_log_out
+
+- override_trigger_log
+
+- stall_flush_lock_state_trace
+
+# 📜 License
+MIT License (or specify your preferred license)
+
+# 👥 Contributors
+Joshua Carter
+
+# 🔮 Future Work
+- Expand supported instruction set for complex workloads
+
+- Integrate real-world quantum data + live entropy sampling
+
+- Deploy on FPGA with physical analog/quantum override circuits
+
+- Explore formal verification for FSM robustness
